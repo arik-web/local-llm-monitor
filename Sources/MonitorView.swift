@@ -183,25 +183,44 @@ struct MonitorPopoverView: View {
                 .foregroundColor(.secondary)
 
             ForEach(snap.clients) { client in
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(client.isConnected ? Color.green : Color.gray.opacity(0.4))
-                        .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(client.isConnected ? Color.green : Color.gray.opacity(0.4))
+                            .frame(width: 7, height: 7)
 
-                    Text(client.name)
-                        .font(.subheadline)
-                        .foregroundColor(client.isConnected ? .primary : .secondary)
+                        Text(client.name)
+                            .font(.subheadline)
+                            .foregroundColor(client.isConnected ? .primary : .secondary)
 
-                    Spacer()
+                        if client.isConnected {
+                            Text("· \(client.computer)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
 
-                    if client.isConnected {
-                        Text("\(client.connectionCount) conn\(client.connectionCount == 1 ? "" : "s")")
-                            .font(.caption.monospacedDigit())
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("idle")
-                            .font(.caption)
-                            .foregroundColor(.secondary.opacity(0.7))
+                        Spacer()
+
+                        if client.isConnected {
+                            Text("\(client.connectionCount) conn\(client.connectionCount == 1 ? "" : "s")")
+                                .font(.caption.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("idle")
+                                .font(.caption)
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+
+                    if client.isConnected && !client.activeDetails.isEmpty {
+                        ForEach(client.activeDetails, id: \.self) { detail in
+                            Text("↳ \(detail)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .padding(.leading, 15)
+                        }
                     }
                 }
                 .padding(.vertical, 2)
@@ -296,6 +315,14 @@ private struct SlotRow: View {
             }
 
             if slot.isProcessing {
+                if let owner = slot.owner {
+                    Text(owner.displayLabel)
+                        .font(.caption)
+                        .foregroundColor(.accentColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
                 HStack {
                     Text(slot.phase.rawValue)
                         .font(.caption2)

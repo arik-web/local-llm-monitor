@@ -41,11 +41,14 @@ final class LLMCollector {
     }
 
     private var previousSamples: [String: SlotSample] = [:]
+    private var pinnedTaskOwners: [String: SlotOwner] = [:]
+    private var hostnameCache: [String: String] = [:]
     private let session: URLSession
     private let logPaths = [
         "/opt/homebrew/var/log/ollama.log",
         NSHomeDirectory() + "/.ollama/logs/server.log"
     ]
+    private let hermesDBPath = NSHomeDirectory() + "/.hermes/state.db"
     private let knownHarnesses = ["Hermes", "DeepSeek Harness", "Orca"]
 
     init() {
@@ -60,8 +63,13 @@ final class LLMCollector {
         let (online, models) = fetchOllamaModels()
         let ports = discoverLlamaServerPorts()
         let logTimings = readRecentLogTimings()
-        let slots = fetchSlots(ports: ports, logTimings: logTimings, now: now)
-        let clients = fetchConnectedClients()
+        let (clients, candidateOwners) = fetchConnectedClients()
+        let slots = fetchSlots(
+            ports: ports,
+            logTimings: logTimings,
+            candidateOwners: candidateOwners,
+            now: now
+        )
 
         return MonitorSnapshot(
             timestamp: now,
@@ -114,9 +122,15 @@ final class LLMCollector {
         return ports.sorted()
     }
 
-    private func fetchSlots(ports: [Int], logTimings: [String: LogTiming], now: Date) -> [SlotInfo] {
-        var allSlots: [SlotInfo] = []
-        var activeKeys = Set<String>()
+    private func fetchSlots(
+        ports: [Int],
+        logTimings: [String: LogTiming],
+        candidateOwners: [SlotOwner],
+        now: Date
+    ) -> [SlotInfo] {
+        var decodedByPort: [(Int, [RawSlot])] = []
+        var activeTaskKeys = Set<String>()
+        var usedOwners = Set<SlotOwner>()
 
         for port in ports {
             guard let url = URL(string: "http://127.0.0.1:\(port)/slots"),
@@ -124,7 +138,30 @@ final class LLMCollector {
                   let rawSlots = try? JSONDecoder().decode([RawSlot].self, from: data) else {
                 continue
             }
+            decodedByPort.append((port, rawSlots))
+            for raw in rawSlots where raw.is_processing == true {
+                let taskKey = "\(port)-\(raw.id)-\(raw.id_task ?? -1)"
+                activeTaskKeys.insert(taskKey)
+                if let pinned = pinnedTaskOwners[taskKey] {
+                    // Refresh detail if a generic owner was pinned earlier and a specific one is now known
+                    if pinned.detail == nil,
+                       let better = candidateOwners.first(where: { $0.program == pinned.program && $0.detail != nil && !usedOwners.contains($0) }) {
+                        pinnedTaskOwners[taskKey] = better
+                        usedOwners.insert(better)
+                    } else {
+                        usedOwners.insert(pinned)
+                    }
+                }
+            }
+        }
 
+        // Prune finished task pins
+        pinnedTaskOwners = pinnedTaskOwners.filter { activeTaskKeys.contains($0.key) }
+
+        var allSlots: [SlotInfo] = []
+        var activeSampleKeys = Set<String>()
+
+        for (port, rawSlots) in decodedByPort {
             for raw in rawSlots {
                 let isProcessing = raw.is_processing ?? false
                 let nDecoded = raw.next_token?.first?.n_decoded ?? 0
@@ -133,7 +170,7 @@ final class LLMCollector {
                 let nCtx = raw.n_ctx ?? 0
                 let taskId = raw.id_task
                 let sampleKey = "\(port)-\(raw.id)-\(taskId ?? -1)"
-                activeKeys.insert(sampleKey)
+                activeSampleKeys.insert(sampleKey)
 
                 var deltaGenTps = 0.0
                 var deltaPromptTps = 0.0
@@ -179,6 +216,20 @@ final class LLMCollector {
                     finalPromptTps = 0
                 }
 
+                var owner: SlotOwner? = nil
+                if isProcessing {
+                    if let pinned = pinnedTaskOwners[sampleKey] {
+                        owner = pinned
+                    } else if let nextFree = candidateOwners.first(where: { !usedOwners.contains($0) }) {
+                        owner = nextFree
+                        usedOwners.insert(nextFree)
+                        pinnedTaskOwners[sampleKey] = nextFree
+                    } else if let fallback = candidateOwners.first {
+                        owner = fallback
+                        pinnedTaskOwners[sampleKey] = fallback
+                    }
+                }
+
                 allSlots.append(
                     SlotInfo(
                         id: "\(port)-\(raw.id)",
@@ -192,14 +243,14 @@ final class LLMCollector {
                         nDecoded: nDecoded,
                         nPromptTokens: nPromptTokens,
                         nPromptProcessed: nPromptProcessed,
-                        nCtx: nCtx
+                        nCtx: nCtx,
+                        owner: owner
                     )
                 )
             }
         }
 
-        // Prune stale samples
-        previousSamples = previousSamples.filter { activeKeys.contains($0.key) }
+        previousSamples = previousSamples.filter { activeSampleKeys.contains($0.key) }
         return allSlots.sorted { ($0.port, $0.slotId) < ($1.port, $1.slotId) }
     }
 
@@ -249,9 +300,9 @@ final class LLMCollector {
         return timings
     }
 
-    // MARK: - Client Discovery (lsof + ps)
+    // MARK: - Client & Sub-Session Discovery
 
-    private func fetchConnectedClients() -> [ClientSession] {
+    private func fetchConnectedClients() -> ([ClientSession], [SlotOwner]) {
         let lsofOutput = runCommand("/usr/sbin/lsof", args: [
             "-iTCP:11434",
             "-sTCP:ESTABLISHED",
@@ -261,6 +312,7 @@ final class LLMCollector {
 
         var pidCommands: [Int32: String] = [:]
         var pidConnCounts: [Int32: Int] = [:]
+        var remoteHostCounts: [String: Int] = [:]
         var currentPid: Int32?
         var currentCmd = ""
         let selfPid = ProcessInfo.processInfo.processIdentifier
@@ -278,8 +330,13 @@ final class LLMCollector {
                     pidCommands[pid] = value
                 }
             case "n":
-                // Count only client side (exclude ollama server and this monitor app)
-                if let pid = currentPid, pid != selfPid, currentCmd.lowercased() != "ollama" {
+                if currentCmd.lowercased() == "ollama" {
+                    // Check for remote computer connections (peer IP != loopback)
+                    if let remoteIP = extractRemotePeerIP(from: value), !isLoopback(remoteIP) {
+                        let host = resolveHostname(for: remoteIP)
+                        remoteHostCounts[host, default: 0] += 1
+                    }
+                } else if let pid = currentPid, pid != selfPid {
                     pidConnCounts[pid, default: 0] += 1
                 }
             default:
@@ -306,76 +363,283 @@ final class LLMCollector {
         struct GroupedClient {
             var count: Int = 0
             var pids: [Int32] = []
+            var computer: String = ComputerInfo.name
+            var details: [String] = []
         }
 
         var grouped: [String: GroupedClient] = [:]
+        var candidateOwners: [SlotOwner] = []
+
         for pid in pids {
             let cmd = pidCommands[pid] ?? "Unknown"
             let args = pidArgs[pid] ?? cmd
-            let name = classifyClient(command: cmd, args: args)
-            var entry = grouped[name] ?? GroupedClient()
+            let (program, subDetail) = classifyClient(command: cmd, args: args)
+            var entry = grouped[program] ?? GroupedClient()
             entry.count += pidConnCounts[pid] ?? 1
             entry.pids.append(pid)
-            grouped[name] = entry
+            if let subDetail, !entry.details.contains(subDetail) {
+                entry.details.append(subDetail)
+            }
+            grouped[program] = entry
+
+            if program != "Hermes" {
+                candidateOwners.append(SlotOwner(
+                    computer: ComputerInfo.name,
+                    program: program,
+                    detail: subDetail
+                ))
+            }
+        }
+
+        // Enrich Hermes with live bot / session names from ~/.hermes/state.db
+        if var hermesEntry = grouped["Hermes"] {
+            let hermesDetails = fetchHermesActiveDetails()
+            hermesEntry.details = hermesDetails
+            grouped["Hermes"] = hermesEntry
+
+            if hermesDetails.isEmpty {
+                candidateOwners.insert(
+                    SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: nil),
+                    at: 0
+                )
+            } else {
+                let hermesOwners = hermesDetails.map {
+                    SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: $0)
+                }
+                candidateOwners.insert(contentsOf: hermesOwners, at: 0)
+            }
+        }
+
+        // Add any remote computers connected over LAN
+        for (remoteHost, count) in remoteHostCounts.sorted(by: { $0.key < $1.key }) {
+            let key = "Remote (\(remoteHost))"
+            grouped[key] = GroupedClient(
+                count: count,
+                pids: [],
+                computer: remoteHost,
+                details: ["LAN Client"]
+            )
+            candidateOwners.append(SlotOwner(
+                computer: remoteHost,
+                program: "Remote Client",
+                detail: nil
+            ))
         }
 
         var results: [ClientSession] = []
 
-        // Known harnesses first (connected or idle)
         for harness in knownHarnesses {
             if let entry = grouped.removeValue(forKey: harness) {
                 results.append(ClientSession(
                     id: harness,
                     name: harness,
+                    computer: entry.computer,
                     isConnected: true,
                     connectionCount: entry.count,
                     pids: entry.pids.sorted(),
-                    isKnownHarness: true
+                    isKnownHarness: true,
+                    activeDetails: entry.details
                 ))
             } else {
                 results.append(ClientSession(
                     id: harness,
                     name: harness,
+                    computer: ComputerInfo.name,
                     isConnected: false,
                     connectionCount: 0,
                     pids: [],
-                    isKnownHarness: true
+                    isKnownHarness: true,
+                    activeDetails: []
                 ))
             }
         }
 
-        // Any other connected clients
         for (name, entry) in grouped.sorted(by: { $0.key < $1.key }) {
             results.append(ClientSession(
                 id: name,
                 name: name,
+                computer: entry.computer,
                 isConnected: true,
                 connectionCount: entry.count,
                 pids: entry.pids.sorted(),
-                isKnownHarness: false
+                isKnownHarness: false,
+                activeDetails: entry.details
             ))
         }
 
-        return results.sorted {
+        results.sort {
             if $0.isConnected != $1.isConnected { return $0.isConnected && !$1.isConnected }
             return $0.name < $1.name
         }
+
+        return (results, candidateOwners)
     }
 
-    private func classifyClient(command: String, args: String) -> String {
+    private func fetchHermesActiveDetails() -> [String] {
+        guard FileManager.default.fileExists(atPath: hermesDBPath) else { return [] }
+
+        let sql = """
+        SELECT l.conversation_id, l.holder, COALESCE(s.source,''), COALESCE(s.display_name,''), COALESCE(s.title,'')
+        FROM session_turn_leases l
+        LEFT JOIN sessions s ON s.id = l.conversation_id
+        WHERE l.expires_at > strftime('%s','now')
+        ORDER BY l.acquired_at DESC;
+        """
+
+        let out = runCommand("/usr/bin/sqlite3", args: [
+            "-readonly",
+            "-separator", "\t",
+            hermesDBPath,
+            sql
+        ])
+
+        var details: [String] = []
+        for line in out.split(separator: "\n") {
+            let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard cols.count >= 5 else { continue }
+            let convId = cols[0]
+            let holder = cols[1]
+            let source = cols[2].isEmpty ? "session" : cols[2]
+            let displayName = cols[3]
+            let title = cleanHermesTitle(cols[4])
+
+            // Verify holder PID is still alive if present
+            if let pid = extractHolderPid(holder), kill(pid, 0) != 0 {
+                continue
+            }
+
+            let label: String
+            if !displayName.isEmpty && !title.isEmpty && displayName != title {
+                label = "\(source): \(displayName) (\(title))"
+            } else if !title.isEmpty {
+                label = "\(source): \(title)"
+            } else if !displayName.isEmpty {
+                label = "\(source): \(displayName)"
+            } else {
+                label = "\(source): \(String(convId.prefix(12)))"
+            }
+
+            if !details.contains(label) {
+                details.append(label)
+            }
+        }
+
+        if !details.isEmpty {
+            return details
+        }
+
+        // Fallback: recently active sessions in last 30s
+        let recentSql = """
+        SELECT id, COALESCE(source,''), COALESCE(display_name,''), COALESCE(title,'')
+        FROM sessions
+        WHERE last_activity_at > strftime('%s','now') - 30
+        ORDER BY last_activity_at DESC
+        LIMIT 6;
+        """
+        let recentOut = runCommand("/usr/bin/sqlite3", args: [
+            "-readonly",
+            "-separator", "\t",
+            hermesDBPath,
+            recentSql
+        ])
+        for line in recentOut.split(separator: "\n") {
+            let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard cols.count >= 4 else { continue }
+            let convId = cols[0]
+            let source = cols[1].isEmpty ? "session" : cols[1]
+            let displayName = cols[2]
+            let title = cleanHermesTitle(cols[3])
+            let name = !title.isEmpty ? title : (!displayName.isEmpty ? displayName : String(convId.prefix(12)))
+            let label = "\(source): \(name)"
+            if !details.contains(label) {
+                details.append(label)
+            }
+        }
+
+        return details
+    }
+
+    private func cleanHermesTitle(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let dotRange = s.range(of: " · ", options: .backwards) {
+            let tail = s[dotRange.upperBound...]
+            if tail.contains(":") {
+                s = String(s[..<dotRange.lowerBound])
+            }
+        }
+        if s.count > 40 {
+            return String(s.prefix(38)) + "…"
+        }
+        return s
+    }
+
+    private func extractHolderPid(_ holder: String) -> Int32? {
+        guard let r = holder.range(of: "pid=") else { return nil }
+        let digits = holder[r.upperBound...].prefix(while: { $0.isNumber })
+        return Int32(digits)
+    }
+
+    private func classifyClient(command: String, args: String) -> (String, String?) {
         let haystack = (command + " " + args).lowercased()
-        if haystack.contains("hermes") { return "Hermes" }
-        if haystack.contains("deepseek") || haystack.contains("dsh-desktop") { return "DeepSeek Harness" }
-        if haystack.contains("orca.app") || haystack.contains("application support/orca") { return "Orca" }
-        if haystack.contains("jarvis") { return "Jarvis" }
-        if haystack.contains("lmstudio") { return "LM Studio" }
-        if haystack.contains("open-webui") { return "Open WebUI" }
-        if haystack.contains("cursor") { return "Cursor" }
-        if haystack.contains("claude") { return "Claude" }
-        return command
+        if haystack.contains("hermes") {
+            if haystack.contains("gateway") { return ("Hermes", "gateway") }
+            if haystack.contains("hermes.app") { return ("Hermes", "desktop") }
+            return ("Hermes", nil)
+        }
+        if haystack.contains("deepseek") || haystack.contains("dsh-desktop") {
+            return ("DeepSeek Harness", haystack.contains("renderer") ? "desktop" : nil)
+        }
+        if haystack.contains("orca.app") || haystack.contains("application support/orca") {
+            if haystack.contains("daemon-entry") { return ("Orca", "daemon") }
+            if haystack.contains("renderer") { return ("Orca", "desktop") }
+            return ("Orca", nil)
+        }
+        if haystack.contains("jarvis") {
+            if haystack.contains("voice.mic") { return ("Jarvis", "voice") }
+            if haystack.contains("serve") { return ("Jarvis", "server") }
+            return ("Jarvis", nil)
+        }
+        if haystack.contains("lmstudio") { return ("LM Studio", nil) }
+        if haystack.contains("open-webui") { return ("Open WebUI", nil) }
+        if haystack.contains("cursor") { return ("Cursor", nil) }
+        if haystack.contains("claude") { return ("Claude", nil) }
+        return (command, nil)
     }
 
-    // MARK: - Helpers
+    // MARK: - Network Helpers
+
+    private func extractRemotePeerIP(from lsofName: String) -> String? {
+        guard let arrow = lsofName.range(of: "->") else { return nil }
+        let peer = String(lsofName[arrow.upperBound...])
+        if peer.hasPrefix("[") {
+            if let closeBracket = peer.firstIndex(of: "]") {
+                return String(peer[peer.index(after: peer.startIndex)..<closeBracket])
+            }
+        }
+        if let colon = peer.lastIndex(of: ":") {
+            return String(peer[..<colon])
+        }
+        return peer
+    }
+
+    private func isLoopback(_ ip: String) -> Bool {
+        ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
+    }
+
+    private func resolveHostname(for ip: String) -> String {
+        if let cached = hostnameCache[ip] { return cached }
+        var resolved = ip
+        if let host = Host(address: ip).name {
+            let short = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
+            if !short.isEmpty {
+                resolved = short
+            }
+        }
+        hostnameCache[ip] = resolved
+        return resolved
+    }
+
+    // MARK: - Process & HTTP Helpers
 
     private func syncGET(url: URL) -> Data? {
         var result: Data?

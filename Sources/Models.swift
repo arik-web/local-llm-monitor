@@ -36,6 +36,26 @@ enum SlotPhase: String, Equatable {
     case idle = "Idle"
 }
 
+struct SlotOwner: Equatable, Hashable {
+    let computer: String
+    let program: String
+    let detail: String?
+
+    var displayLabel: String {
+        if let detail, !detail.isEmpty {
+            return "\(computer) · \(program) · \(detail)"
+        }
+        return "\(computer) · \(program)"
+    }
+
+    var reportClientKey: String {
+        if let detail, !detail.isEmpty {
+            return "\(program) — \(detail)"
+        }
+        return program
+    }
+}
+
 struct SlotInfo: Identifiable, Equatable {
     let id: String
     let slotId: Int
@@ -49,6 +69,7 @@ struct SlotInfo: Identifiable, Equatable {
     let nPromptTokens: Int
     let nPromptProcessed: Int
     let nCtx: Int
+    let owner: SlotOwner?
 
     var activeTps: Double {
         switch phase {
@@ -76,10 +97,12 @@ struct SlotInfo: Identifiable, Equatable {
 struct ClientSession: Identifiable, Equatable {
     let id: String
     let name: String
+    let computer: String
     let isConnected: Bool
     let connectionCount: Int
     let pids: [Int32]
     let isKnownHarness: Bool
+    let activeDetails: [String]
 }
 
 struct MonitorSnapshot: Equatable {

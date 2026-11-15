@@ -40,6 +40,9 @@ struct UsageBucket: Codable, Equatable {
     let hourEpoch: TimeInterval
     let client: String
     let model: String
+    var computer: String?
+    var program: String?
+    var detail: String?
     var genTokens: Int
     var promptTokens: Int
     var activeSeconds: Double
@@ -64,6 +67,9 @@ private struct UsageHistoryPayload: Codable {
 struct ClientUsageSummary: Identifiable {
     let id: String
     let client: String
+    let computer: String
+    let program: String
+    let detail: String
     let genTokens: Int
     let promptTokens: Int
     let totalTokens: Int
@@ -224,9 +230,9 @@ final class UsageStore {
             concurrencyBuckets[bucketEpoch] = cb
         }
 
-        let connectedClients = snapshot.clients.filter { $0.isConnected }.map { $0.name }
-        let targetClients = connectedClients.isEmpty ? ["Local / Other"] : connectedClients
-        let shareCount = targetClients.count
+        let connectedClients = snapshot.clients.filter { $0.isConnected }
+        let fallbackClient = connectedClients.first?.name ?? "Local / Other"
+        let fallbackComputer = connectedClients.first?.computer ?? ComputerInfo.name
 
         var activeKeys = Set<String>()
 
@@ -262,34 +268,35 @@ final class UsageStore {
 
             guard deltaGen > 0 || deltaPrompt > 0 || isNewTask || dt > 0 else { continue }
 
-            for (idx, client) in targetClients.enumerated() {
-                let genShare = splitInt(deltaGen, parts: shareCount, index: idx)
-                let promptShare = splitInt(deltaPrompt, parts: shareCount, index: idx)
-                let reqShare = (isNewTask && idx == 0) ? 1 : 0
-                let dtShare = dt / Double(shareCount)
+            let ownerComputer = slot.owner?.computer ?? fallbackComputer
+            let ownerProgram = slot.owner?.program ?? fallbackClient
+            let ownerDetail = slot.owner?.detail
+            let clientLabel = slot.owner?.reportClientKey ?? fallbackClient
 
-                let bucketKey = "\(Int64(bucketEpoch))|\(client)|\(modelName)"
-                var b = buckets[bucketKey] ?? UsageBucket(
-                    hourEpoch: bucketEpoch,
-                    client: client,
-                    model: modelName,
-                    genTokens: 0,
-                    promptTokens: 0,
-                    activeSeconds: 0,
-                    requestCount: 0,
-                    tpsSum: 0,
-                    tpsSamples: 0
-                )
-                b.genTokens += genShare
-                b.promptTokens += promptShare
-                b.activeSeconds += dtShare
-                b.requestCount += reqShare
-                if slot.phase == .generating && slot.genTps > 0 {
-                    b.tpsSum += slot.genTps
-                    b.tpsSamples += 1
-                }
-                buckets[bucketKey] = b
+            let bucketKey = "\(Int64(bucketEpoch))|\(ownerComputer)|\(clientLabel)|\(modelName)"
+            var b = buckets[bucketKey] ?? UsageBucket(
+                hourEpoch: bucketEpoch,
+                client: clientLabel,
+                model: modelName,
+                computer: ownerComputer,
+                program: ownerProgram,
+                detail: ownerDetail,
+                genTokens: 0,
+                promptTokens: 0,
+                activeSeconds: 0,
+                requestCount: 0,
+                tpsSum: 0,
+                tpsSamples: 0
+            )
+            b.genTokens += deltaGen
+            b.promptTokens += deltaPrompt
+            b.activeSeconds += dt
+            b.requestCount += (isNewTask ? 1 : 0)
+            if slot.phase == .generating && slot.genTps > 0 {
+                b.tpsSum += slot.genTps
+                b.tpsSamples += 1
             }
+            buckets[bucketKey] = b
         }
 
         cursors = cursors.filter { activeKeys.contains($0.key) }
@@ -317,6 +324,9 @@ final class UsageStore {
         var totalTpsSamples = 0
 
         struct ClientAcc {
+            var computer: String = ComputerInfo.name
+            var program: String = ""
+            var detail: String = ""
             var gen = 0
             var prompt = 0
             var req = 0
@@ -344,14 +354,18 @@ final class UsageStore {
             totalTpsSum += b.tpsSum
             totalTpsSamples += b.tpsSamples
 
-            var ca = clientMap[b.client] ?? ClientAcc()
+            let comp = b.computer ?? ComputerInfo.name
+            let prog = b.program ?? b.client
+            let det = b.detail ?? ""
+            let summaryKey = "\(comp)|\(b.client)"
+            var ca = clientMap[summaryKey] ?? ClientAcc(computer: comp, program: prog, detail: det)
             ca.gen += b.genTokens
             ca.prompt += b.promptTokens
             ca.req += b.requestCount
             ca.sec += b.activeSeconds
             ca.tpsSum += b.tpsSum
             ca.tpsSamples += b.tpsSamples
-            clientMap[b.client] = ca
+            clientMap[summaryKey] = ca
 
             var ma = modelMap[b.model] ?? ModelAcc()
             ma.gen += b.genTokens
@@ -429,13 +443,17 @@ final class UsageStore {
         let avgParallel = globalSamples > 0 ? globalWeightedSlots / Double(globalSamples) : 0
         let totalTokens = totalGen + totalPrompt
 
-        let clientSummaries = clientMap.map { (name, acc) in
+        let clientSummaries = clientMap.map { (key, acc) in
             let tot = acc.gen + acc.prompt
             let avgTps = acc.tpsSamples > 0 ? acc.tpsSum / Double(acc.tpsSamples) : 0
             let ratio = totalTokens > 0 ? Double(tot) / Double(totalTokens) : 0
+            let displayClient = acc.detail.isEmpty ? acc.program : "\(acc.program) — \(acc.detail)"
             return ClientUsageSummary(
-                id: name,
-                client: name,
+                id: key,
+                client: displayClient,
+                computer: acc.computer,
+                program: acc.program,
+                detail: acc.detail,
                 genTokens: acc.gen,
                 promptTokens: acc.prompt,
                 totalTokens: tot,
