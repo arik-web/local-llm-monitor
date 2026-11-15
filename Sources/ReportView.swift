@@ -82,13 +82,19 @@ struct ReportView: View {
                 }
             }
             Spacer()
-            Picker("Timeframe", selection: $timeframe) {
-                ForEach(ReportTimeframe.allCases) { tf in
-                    Text(tf.rawValue).tag(tf)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Timeframe")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Picker("Timeframe", selection: $timeframe) {
+                    ForEach(ReportTimeframe.allCases) { tf in
+                        Text(tf.rawValue).tag(tf)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 200)
             }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
 
             Button {
                 reload()

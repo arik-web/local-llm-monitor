@@ -29,7 +29,10 @@ cat > "$PLIST" << 'EOF'
 EOF
 
 UID_NUM=$(id -u)
-launchctl bootout "gui/$UID_NUM/com.local.llm-monitor" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+if launchctl print "gui/$UID_NUM/com.local.llm-monitor" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$UID_NUM/com.local.llm-monitor"
+else
+    launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+fi
 
 echo "Installed and running from /Applications/LocalLLMMonitor.app"
