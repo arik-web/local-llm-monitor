@@ -22,3 +22,13 @@ swiftc -O \
   -o "$MACOS_DIR/LocalLLMMonitor"
 
 echo "Built $APP_DIR"
+
+if [[ "${1:-}" != "--no-push" ]] && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$ROOT_DIR" remote get-url origin >/dev/null 2>&1; then
+    if [[ -n "$(git -C "$ROOT_DIR" status --porcelain)" ]]; then
+      git -C "$ROOT_DIR" add -A
+      git -C "$ROOT_DIR" commit -m "Build $(date '+%Y-%m-%d %H:%M:%S')"
+    fi
+    git -C "$ROOT_DIR" push origin HEAD
+  fi
+fi
