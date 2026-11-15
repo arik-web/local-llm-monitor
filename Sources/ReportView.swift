@@ -25,7 +25,7 @@ final class ReportWindowController {
             backing: .buffered,
             defer: false
         )
-        win.title = "Local LLM — Usage Report"
+        win.title = "Local LLM (\(ComputerInfo.name)) — Usage Report"
         win.minSize = NSSize(width: 680, height: 560)
         win.center()
         win.contentViewController = hosting
@@ -73,7 +73,7 @@ struct ReportView: View {
     private var headerRow: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(timeframe.title) Usage")
+                Text("\(timeframe.title) Usage · \(ComputerInfo.name)")
                     .font(.title2.weight(.semibold))
                 if let report {
                     Text("Updated \(report.generatedAt.formatted(date: .omitted, time: .standard))")

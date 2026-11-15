@@ -1,5 +1,19 @@
 import Foundation
 
+enum ComputerInfo {
+    static let name: String = {
+        if let localized = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !localized.isEmpty {
+            return localized
+        }
+        let host = ProcessInfo.processInfo.hostName
+        if host.hasSuffix(".local") {
+            return String(host.dropLast(6))
+        }
+        return host
+    }()
+}
+
 struct LoadedModelInfo: Identifiable, Equatable {
     let id: String
     let name: String

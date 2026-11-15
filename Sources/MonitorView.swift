@@ -58,7 +58,7 @@ struct MonitorPopoverView: View {
             footerView
         }
         .padding(14)
-        .frame(width: 340)
+        .frame(width: 370)
     }
 
     private var headerView: some View {
@@ -68,6 +68,10 @@ struct MonitorPopoverView: View {
                     .foregroundColor(.accentColor)
                 Text("Local LLM Monitor")
                     .font(.headline)
+                Text("· \(ComputerInfo.name)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
             HStack(spacing: 5) {
