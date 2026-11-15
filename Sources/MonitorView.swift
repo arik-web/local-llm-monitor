@@ -343,9 +343,13 @@ private func formatCompact(_ n: Int) -> String {
     return "\(n)"
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class PinnedPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var panel: NSPanel!
     private let store = MonitorStore()
     private var reportController: ReportWindowController!
     private var cancellable: AnyCancellable?
@@ -358,26 +362,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: "Local LLM")
             button.imagePosition = .imageLeading
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(togglePanel(_:))
             button.target = self
         }
 
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.contentViewController = NSHostingController(
-            rootView: MonitorPopoverView(
-                store: store,
-                onOpenReport: { [weak self] in
-                    self?.popover.performClose(nil)
-                    self?.reportController.show()
-                },
-                onQuit: { [weak self] in
-                    self?.store.usageStore.flush()
-                    NSApplication.shared.terminate(nil)
-                }
-            )
+        let contentView = MonitorPopoverView(
+            store: store,
+            onOpenReport: { [weak self] in
+                self?.panel.orderOut(nil)
+                self?.reportController.show()
+            },
+            onQuit: { [weak self] in
+                self?.store.usageStore.flush()
+                NSApplication.shared.terminate(nil)
+            }
         )
+
+        let hosting = NSHostingController(rootView: contentView)
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+
+        let fxView = NSVisualEffectView()
+        fxView.material = .popover
+        fxView.state = .active
+        fxView.wantsLayer = true
+        fxView.layer?.cornerRadius = 12
+        fxView.layer?.masksToBounds = true
+        fxView.addSubview(hosting.view)
+
+        NSLayoutConstraint.activate([
+            hosting.view.topAnchor.constraint(equalTo: fxView.topAnchor),
+            hosting.view.bottomAnchor.constraint(equalTo: fxView.bottomAnchor),
+            hosting.view.leadingAnchor.constraint(equalTo: fxView.leadingAnchor),
+            hosting.view.trailingAnchor.constraint(equalTo: fxView.trailingAnchor)
+        ])
+
+        let size = hosting.sizeThatFits(in: NSSize(width: 370, height: 800))
+        let p = PinnedPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.level = .popUpMenu
+        p.collectionBehavior = [.transient, .ignoresCycle]
+        p.contentView = fxView
+        p.delegate = self
+        self.panel = p
 
         cancellable = store.$snapshot
             .receive(on: DispatchQueue.main)
@@ -390,6 +423,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         store.usageStore.flush()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        if (notification.object as? NSPanel) === panel {
+            panel.orderOut(nil)
+        }
     }
 
     private func updateMenuBarTitle(_ snap: MonitorSnapshot) {
@@ -410,13 +449,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func togglePopover(_ sender: AnyObject?) {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(sender)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+    @objc private func togglePanel(_ sender: AnyObject?) {
+        guard let button = statusItem.button, let buttonWindow = button.window else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+            return
         }
+
+        // Size and position once on open; stays pinned until closed and reopened
+        let contentSize = panel.contentView?.fittingSize ?? NSSize(width: 370, height: 420)
+        let buttonRectInScreen = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+
+        var x = buttonRectInScreen.midX - contentSize.width / 2
+        let y = buttonRectInScreen.minY - contentSize.height - 6
+
+        if let screenFrame = buttonWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+            x = min(max(x, screenFrame.minX + 8), screenFrame.maxX - contentSize.width - 8)
+        }
+
+        panel.setFrame(NSRect(x: x, y: y, width: contentSize.width, height: contentSize.height), display: true)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
