@@ -71,10 +71,31 @@ def classify_client(cmd: str, args: str) -> str:
     return cmd or "Local Client"
 
 
-def identify_peer(client_ip: str, client_port: int) -> tuple[str, str]:
-    computer = LOCAL_COMPUTER_NAME if client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1") else client_ip
+def resolve_computer(ip: str) -> str:
+    if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return LOCAL_COMPUTER_NAME
+    try:
+        host, _, _ = socket.gethostbyaddr(ip)
+        return host.removesuffix(".local") or ip
+    except Exception:
+        return ip
+
+
+def identify_peer(client_ip: str, client_port: int, headers: dict) -> tuple[str, str]:
+    xff = (headers.get("X-Forwarded-For") or headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    ua = (headers.get("User-Agent") or headers.get("user-agent") or "").lower()
+    x_title = (headers.get("X-Title") or headers.get("x-title") or "").lower()
+    hint = f"{ua} {x_title}"
+
+    computer = resolve_computer(xff if xff else client_ip)
     if computer != LOCAL_COMPUTER_NAME:
-        return computer, "Remote Client"
+        if "deepseek" in hint or "dsh" in hint:
+            return computer, "DeepSeek Harness"
+        if "orca" in hint:
+            return computer, "Orca"
+        if "hermes" in hint:
+            return computer, "Hermes"
+        return computer, "Remote API"
 
     try:
         out = subprocess.run(
@@ -131,6 +152,12 @@ def queue_snapshot_locked(now: float | None = None) -> dict:
 
 class QueueProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            pass
 
     def log_message(self, fmt, *args):
         pass
@@ -222,7 +249,7 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        computer, program = identify_peer(self.client_address[0], self.client_address[1])
+        computer, program = identify_peer(self.client_address[0], self.client_address[1], headers)
         acquired = False
         task = None
 

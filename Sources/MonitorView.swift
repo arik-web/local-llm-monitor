@@ -57,17 +57,20 @@ struct MonitorPopoverView: View {
     private var snap: MonitorSnapshot { store.snapshot }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            headerView
-            modelSection
-            summarySection
-            slotsSection
-            queueSection
-            clientsSection
-            footerView
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                headerView
+                modelSection
+                summarySection
+                slotsSection
+                queueSection
+                clientsSection
+                footerView
+            }
+            .padding(14)
         }
-        .padding(14)
         .frame(width: 370)
+        .frame(maxHeight: 680)
     }
 
     private var headerView: some View {
