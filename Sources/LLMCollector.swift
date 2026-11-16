@@ -40,6 +40,21 @@ final class LLMCollector {
         let next_token: [NextToken]?
     }
 
+    private struct RawQueueResponse: Decodable {
+        struct Item: Decodable {
+            let id: String
+            let position: Int
+            let computer: String
+            let program: String
+            let model: String
+            let path: String
+            let waitSeconds: Double
+        }
+        let maxConcurrent: Int?
+        let activeCount: Int?
+        let queued: [Item]?
+    }
+
     private var previousSamples: [String: SlotSample] = [:]
     private var pinnedTaskOwners: [String: SlotOwner] = [:]
     private var hostnameCache: [String: String] = [:]
@@ -70,14 +85,48 @@ final class LLMCollector {
             candidateOwners: candidateOwners,
             now: now
         )
+        let queued = fetchQueuedTasks()
 
         return MonitorSnapshot(
             timestamp: now,
             ollamaOnline: online || !ports.isEmpty,
             models: models,
             slots: slots,
-            clients: clients
+            clients: clients,
+            queuedTasks: queued
         )
+    }
+
+    func moveQueuedTask(id: String, direction: String) {
+        guard let url = URL(string: "http://127.0.0.1:11434/_queue/move") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "direction": direction])
+        let sem = DispatchSemaphore(value: 0)
+        session.dataTask(with: req) { _, _, _ in
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 1.0)
+    }
+
+    private func fetchQueuedTasks() -> [QueuedTask] {
+        guard let url = URL(string: "http://127.0.0.1:11434/_queue"),
+              let data = syncGET(url: url),
+              let decoded = try? JSONDecoder().decode(RawQueueResponse.self, from: data) else {
+            return []
+        }
+        return (decoded.queued ?? []).map {
+            QueuedTask(
+                id: $0.id,
+                position: $0.position,
+                computer: $0.computer,
+                program: $0.program,
+                model: $0.model,
+                path: $0.path,
+                waitSeconds: $0.waitSeconds
+            )
+        }
     }
 
     // MARK: - Ollama /api/ps
@@ -373,6 +422,7 @@ final class LLMCollector {
         for pid in pids {
             let cmd = pidCommands[pid] ?? "Unknown"
             let args = pidArgs[pid] ?? cmd
+            if args.contains("llm_queue_proxy.py") { continue }
             let (program, subDetail) = classifyClient(command: cmd, args: args)
             var entry = grouped[program] ?? GroupedClient()
             entry.count += pidConnCounts[pid] ?? 1

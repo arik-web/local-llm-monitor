@@ -7,6 +7,9 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 rm -rf /Applications/LocalLLMMonitor.app
 cp -R "$ROOT_DIR/LocalLLMMonitor.app" /Applications/LocalLLMMonitor.app
 
+mkdir -p "$HOME/.local/share/llm-queue-proxy"
+cp "$ROOT_DIR/QueueProxy/llm_queue_proxy.py" "$HOME/.local/share/llm-queue-proxy/llm_queue_proxy.py"
+
 PLIST="$HOME/Library/LaunchAgents/com.local.llm-monitor.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" << 'EOF'

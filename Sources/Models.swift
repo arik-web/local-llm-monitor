@@ -105,12 +105,23 @@ struct ClientSession: Identifiable, Equatable {
     let activeDetails: [String]
 }
 
+struct QueuedTask: Identifiable, Equatable {
+    let id: String
+    let position: Int
+    let computer: String
+    let program: String
+    let model: String
+    let path: String
+    let waitSeconds: Double
+}
+
 struct MonitorSnapshot: Equatable {
     let timestamp: Date
     let ollamaOnline: Bool
     let models: [LoadedModelInfo]
     let slots: [SlotInfo]
     let clients: [ClientSession]
+    let queuedTasks: [QueuedTask]
 
     var activeSlots: [SlotInfo] {
         slots.filter { $0.isProcessing }
@@ -141,6 +152,7 @@ struct MonitorSnapshot: Equatable {
         ollamaOnline: false,
         models: [],
         slots: [],
-        clients: []
+        clients: [],
+        queuedTasks: []
     )
 }

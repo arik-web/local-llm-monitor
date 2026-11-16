@@ -28,6 +28,14 @@ final class MonitorStore: ObservableObject {
         }
     }
 
+    func moveQueueItem(id: String, direction: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.collector.moveQueuedTask(id: id, direction: direction)
+            self.pollOnce()
+        }
+    }
+
     private func pollOnce() {
         guard !isPolling else { return }
         isPolling = true
@@ -54,6 +62,7 @@ struct MonitorPopoverView: View {
             modelSection
             summarySection
             slotsSection
+            queueSection
             clientsSection
             footerView
         }
@@ -171,6 +180,74 @@ struct MonitorPopoverView: View {
             } else {
                 ForEach(snap.slots) { slot in
                     SlotRow(slot: slot)
+                }
+            }
+        }
+    }
+
+    private var queueSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Queue")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(snap.queuedTasks.isEmpty ? "empty" : "\(snap.queuedTasks.count) waiting")
+                    .font(.caption2)
+                    .foregroundColor(snap.queuedTasks.isEmpty ? .secondary : .orange)
+            }
+
+            if !snap.queuedTasks.isEmpty {
+                ForEach(Array(snap.queuedTasks.enumerated()), id: \.element.id) { idx, item in
+                    HStack(spacing: 8) {
+                        Text("#\(item.position)")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundColor(.orange)
+                            .frame(width: 24, alignment: .leading)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(item.computer) · \(item.program)")
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                                if !item.model.isEmpty {
+                                    Text(item.model)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Text("\(Int(item.waitSeconds))s wait")
+                            }
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        HStack(spacing: 4) {
+                            Button {
+                                store.moveQueueItem(id: item.id, direction: "up")
+                            } label: {
+                                Image(systemName: "arrow.up")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(idx == 0)
+
+                            Button {
+                                store.moveQueueItem(id: item.id, direction: "down")
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(idx == snap.queuedTasks.count - 1)
+                        }
+                    }
+                    .padding(7)
+                    .background(Color.orange.opacity(0.08))
+                    .cornerRadius(7)
                 }
             }
         }
@@ -465,14 +542,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let sess = snap.activeSessionCount
+        let qSuffix = snap.queuedTasks.isEmpty ? "" : " · \(snap.queuedTasks.count)q"
         if sess == 0 {
-            button.title = " 0 sess"
+            button.title = " 0 sess\(qSuffix)"
         } else if snap.totalGenTps > 0 {
-            button.title = String(format: " %d sess · %.1f t/s", sess, snap.totalGenTps)
+            button.title = String(format: " %d sess%@ · %.1f t/s", sess, qSuffix, snap.totalGenTps)
         } else if snap.totalPromptTps > 0 {
-            button.title = String(format: " %d sess · %.0f pp/s", sess, snap.totalPromptTps)
+            button.title = String(format: " %d sess%@ · %.0f pp/s", sess, qSuffix, snap.totalPromptTps)
         } else {
-            button.title = " \(sess) sess"
+            button.title = " \(sess) sess\(qSuffix)"
         }
     }
 
