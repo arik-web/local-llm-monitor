@@ -41,6 +41,14 @@ final class LLMCollector {
     }
 
     private struct RawQueueResponse: Decodable {
+        struct ActiveItem: Decodable {
+            let id: String
+            let computer: String
+            let program: String
+            let model: String
+            let path: String
+            let elapsedSeconds: Double
+        }
         struct Item: Decodable {
             let id: String
             let position: Int
@@ -52,6 +60,7 @@ final class LLMCollector {
         }
         let maxConcurrent: Int?
         let activeCount: Int?
+        let active: [ActiveItem]?
         let queued: [Item]?
     }
 
@@ -78,14 +87,14 @@ final class LLMCollector {
         let (online, models) = fetchOllamaModels()
         let ports = discoverLlamaServerPorts()
         let logTimings = readRecentLogTimings()
-        let (clients, candidateOwners) = fetchConnectedClients()
+        let (activeProxyOwners, queued) = fetchQueueState()
+        let (clients, candidateOwners) = fetchConnectedClients(activeProxyOwners: activeProxyOwners)
         let slots = fetchSlots(
             ports: ports,
             logTimings: logTimings,
             candidateOwners: candidateOwners,
             now: now
         )
-        let queued = fetchQueuedTasks()
 
         return MonitorSnapshot(
             timestamp: now,
@@ -110,13 +119,16 @@ final class LLMCollector {
         _ = sem.wait(timeout: .now() + 1.0)
     }
 
-    private func fetchQueuedTasks() -> [QueuedTask] {
+    private func fetchQueueState() -> ([SlotOwner], [QueuedTask]) {
         guard let url = URL(string: "http://127.0.0.1:11434/_queue"),
               let data = syncGET(url: url),
               let decoded = try? JSONDecoder().decode(RawQueueResponse.self, from: data) else {
-            return []
+            return ([], [])
         }
-        return (decoded.queued ?? []).map {
+        let activeOwners = (decoded.active ?? []).map {
+            SlotOwner(computer: $0.computer, program: $0.program, detail: nil)
+        }
+        let queued = (decoded.queued ?? []).map {
             QueuedTask(
                 id: $0.id,
                 position: $0.position,
@@ -127,6 +139,7 @@ final class LLMCollector {
                 waitSeconds: $0.waitSeconds
             )
         }
+        return (activeOwners, queued)
     }
 
     // MARK: - Ollama /api/ps
@@ -351,7 +364,7 @@ final class LLMCollector {
 
     // MARK: - Client & Sub-Session Discovery
 
-    private func fetchConnectedClients() -> ([ClientSession], [SlotOwner]) {
+    private func fetchConnectedClients(activeProxyOwners: [SlotOwner]) -> ([ClientSession], [SlotOwner]) {
         let lsofOutput = runCommand("/usr/sbin/lsof", args: [
             "-iTCP:11434",
             "-sTCP:ESTABLISHED",
@@ -422,7 +435,7 @@ final class LLMCollector {
         for pid in pids {
             let cmd = pidCommands[pid] ?? "Unknown"
             let args = pidArgs[pid] ?? cmd
-            if args.contains("llm_queue_proxy.py") { continue }
+            if args.contains("llm_queue_proxy.py") || args.contains("ollama-auth-proxy") { continue }
             let (program, subDetail) = classifyClient(command: cmd, args: args)
             var entry = grouped[program] ?? GroupedClient()
             entry.count += pidConnCounts[pid] ?? 1
@@ -438,6 +451,18 @@ final class LLMCollector {
                     program: program,
                     detail: subDetail
                 ))
+            }
+        }
+
+        // Merge active proxy tasks (especially remote computers via Auth Proxy)
+        for owner in activeProxyOwners where owner.program != "Hermes" {
+            let key = owner.program
+            var entry = grouped[key] ?? GroupedClient(count: 0, pids: [], computer: owner.computer, details: [])
+            entry.count = max(entry.count, 1)
+            entry.computer = owner.computer
+            grouped[key] = entry
+            if !candidateOwners.contains(owner) {
+                candidateOwners.append(owner)
             }
         }
 

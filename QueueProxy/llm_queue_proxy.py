@@ -46,6 +46,7 @@ LOCAL_COMPUTER_NAME = socket.gethostname().removesuffix(".local") or "Studio"
 
 queue_cond = threading.Condition()
 active_count = 0
+active_tasks: list[dict] = []
 waiting_queue: list[dict] = []
 next_seq = 0
 
@@ -151,6 +152,17 @@ def queue_snapshot_locked(now: float | None = None) -> dict:
     return {
         "maxConcurrent": MAX_CONCURRENT,
         "activeCount": active_count,
+        "active": [
+            {
+                "id": item["id"],
+                "computer": item["computer"],
+                "program": item["program"],
+                "model": item["model"],
+                "path": item["path"],
+                "elapsedSeconds": round(max(0.0, t - item.get("startedAt", t)), 1),
+            }
+            for item in active_tasks
+        ],
         "queued": [
             {
                 "id": item["id"],
@@ -271,20 +283,23 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
         task = None
 
         with queue_cond:
+            next_seq += 1
+            task = {
+                "id": f"q-{next_seq}",
+                "computer": computer,
+                "program": program,
+                "model": model,
+                "path": path_only,
+                "enqueuedAt": time.time(),
+                "startedAt": time.time(),
+                "cancelled": False,
+            }
             if active_count < MAX_CONCURRENT and not waiting_queue:
                 active_count += 1
+                task["startedAt"] = time.time()
+                active_tasks.append(task)
                 acquired = True
             else:
-                next_seq += 1
-                task = {
-                    "id": f"q-{next_seq}",
-                    "computer": computer,
-                    "program": program,
-                    "model": model,
-                    "path": path_only,
-                    "enqueuedAt": time.time(),
-                    "cancelled": False,
-                }
                 waiting_queue.append(task)
                 queue_cond.notify_all()
 
@@ -297,6 +312,8 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
                     if active_count < MAX_CONCURRENT and waiting_queue and waiting_queue[0]["id"] == task["id"]:
                         waiting_queue.pop(0)
                         active_count += 1
+                        task["startedAt"] = time.time()
+                        active_tasks.append(task)
                         acquired = True
                         queue_cond.notify_all()
                         break
@@ -308,6 +325,8 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
         finally:
             if acquired:
                 with queue_cond:
+                    if task in active_tasks:
+                        active_tasks.remove(task)
                     active_count = max(0, active_count - 1)
                     queue_cond.notify_all()
 
