@@ -66,6 +66,7 @@ final class LLMCollector {
 
     private var previousSamples: [String: SlotSample] = [:]
     private var pinnedTaskOwners: [String: SlotOwner] = [:]
+    private var taskStartTimes: [String: Date] = [:]
     private var hostnameCache: [String: String] = [:]
     private let session: URLSession
     private let logPaths = [
@@ -217,8 +218,9 @@ final class LLMCollector {
             }
         }
 
-        // Prune finished task pins
+        // Prune finished task pins and start times
         pinnedTaskOwners = pinnedTaskOwners.filter { activeTaskKeys.contains($0.key) }
+        taskStartTimes = taskStartTimes.filter { activeTaskKeys.contains($0.key) }
 
         var allSlots: [SlotInfo] = []
         var activeSampleKeys = Set<String>()
@@ -279,7 +281,14 @@ final class LLMCollector {
                 }
 
                 var owner: SlotOwner? = nil
+                var elapsedSeconds: Double = 0
                 if isProcessing {
+                    let start = taskStartTimes[sampleKey] ?? {
+                        taskStartTimes[sampleKey] = now
+                        return now
+                    }()
+                    elapsedSeconds = max(0, now.timeIntervalSince(start))
+
                     if let pinned = pinnedTaskOwners[sampleKey] {
                         owner = pinned
                     } else if let nextFree = candidateOwners.first(where: { !usedOwners.contains($0) }) {
@@ -306,7 +315,8 @@ final class LLMCollector {
                         nPromptTokens: nPromptTokens,
                         nPromptProcessed: nPromptProcessed,
                         nCtx: nCtx,
-                        owner: owner
+                        owner: owner,
+                        elapsedSeconds: elapsedSeconds
                     )
                 )
             }

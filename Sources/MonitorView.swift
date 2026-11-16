@@ -388,6 +388,15 @@ private struct SlotRow: View {
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
+                if slot.isProcessing {
+                    Text(formatElapsed(slot.elapsedSeconds))
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
                 Spacer()
                 Text(speedLabel)
                     .font(.subheadline.weight(.semibold).monospacedDigit())
@@ -448,6 +457,17 @@ private func formatCompact(_ n: Int) -> String {
         return String(format: "%.1fk", Double(n) / 1000.0)
     }
     return "\(n)"
+}
+
+private func formatElapsed(_ seconds: Double) -> String {
+    let total = max(0, Int(seconds))
+    let h = total / 3600
+    let m = (total % 3600) / 60
+    let s = total % 60
+    if h > 0 {
+        return String(format: "%d:%02d:%02d", h, m, s)
+    }
+    return String(format: "%d:%02d", m, s)
 }
 
 private final class PinnedPanel: NSPanel {

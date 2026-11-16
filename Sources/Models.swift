@@ -70,6 +70,7 @@ struct SlotInfo: Identifiable, Equatable {
     let nPromptProcessed: Int
     let nCtx: Int
     let owner: SlotOwner?
+    let elapsedSeconds: Double
 
     var activeTps: Double {
         switch phase {
