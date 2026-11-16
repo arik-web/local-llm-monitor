@@ -71,9 +71,26 @@ def classify_client(cmd: str, args: str) -> str:
     return cmd or "Local Client"
 
 
+HOSTS_FILE = os.path.expanduser("~/.local/share/llm-queue-proxy/hosts.json")
+
+
+def load_host_aliases() -> dict[str, str]:
+    try:
+        with open(HOSTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
 def resolve_computer(ip: str) -> str:
     if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
         return LOCAL_COMPUTER_NAME
+    aliases = load_host_aliases()
+    if ip in aliases:
+        return aliases[ip]
     try:
         host, _, _ = socket.gethostbyaddr(ip)
         return host.removesuffix(".local") or ip

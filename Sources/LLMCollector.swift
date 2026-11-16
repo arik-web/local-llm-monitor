@@ -678,6 +678,13 @@ final class LLMCollector {
 
     private func resolveHostname(for ip: String) -> String {
         if let cached = hostnameCache[ip] { return cached }
+        let hostsPath = NSHomeDirectory() + "/.local/share/llm-queue-proxy/hosts.json"
+        if let data = FileManager.default.contents(atPath: hostsPath),
+           let map = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+           let alias = map[ip], !alias.isEmpty {
+            hostnameCache[ip] = alias
+            return alias
+        }
         var resolved = ip
         if let host = Host(address: ip).name {
             let short = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
