@@ -76,13 +76,28 @@ final class LLMCollector {
         NSHomeDirectory() + "/.ollama/logs/server.log"
     ]
     private let hermesDBPath = NSHomeDirectory() + "/.hermes/state.db"
+    private let knownClientsPath: String
     private let knownHarnesses = ["Hermes", "DeepSeek Harness", "Orca"]
+    private var seenClients: Set<String>
 
     init() {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 1.0
         config.timeoutIntervalForResource = 1.5
         self.session = URLSession(configuration: config)
+
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("LocalLLMMonitor", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("known_clients.json").path
+        self.knownClientsPath = path
+
+        var initial = Set(knownHarnesses)
+        if let data = FileManager.default.contents(atPath: path),
+           let saved = try? JSONDecoder().decode([String].self, from: data) {
+            initial.formUnion(saved)
+        }
+        self.seenClients = initial
     }
 
     func collect() -> MonitorSnapshot {
@@ -91,7 +106,11 @@ final class LLMCollector {
         let ports = discoverLlamaServerPorts()
         let logTimings = readRecentLogTimings()
         let (activeProxyOwners, queued, priorities) = fetchQueueState()
-        let (clients, candidateOwners) = fetchConnectedClients(activeProxyOwners: activeProxyOwners)
+        let (clients, candidateOwners) = fetchConnectedClients(
+            activeProxyOwners: activeProxyOwners,
+            queuedTasks: queued,
+            priorities: priorities
+        )
         let slots = fetchSlots(
             ports: ports,
             logTimings: logTimings,
@@ -394,7 +413,11 @@ final class LLMCollector {
 
     // MARK: - Client & Sub-Session Discovery
 
-    private func fetchConnectedClients(activeProxyOwners: [SlotOwner]) -> ([ClientSession], [SlotOwner]) {
+    private func fetchConnectedClients(
+        activeProxyOwners: [SlotOwner],
+        queuedTasks: [QueuedTask],
+        priorities: [String: ClientPriority]
+    ) -> ([ClientSession], [SlotOwner]) {
         let lsofOutput = runCommand("/usr/sbin/lsof", args: [
             "-iTCP:11434",
             "-sTCP:ESTABLISHED",
@@ -531,29 +554,51 @@ final class LLMCollector {
             ))
         }
 
+        // Ensure any queued client program is also represented in Clients
+        for q in queuedTasks where !q.program.isEmpty {
+            if grouped[q.program] == nil {
+                grouped[q.program] = GroupedClient(
+                    count: 1,
+                    pids: [],
+                    computer: q.computer,
+                    details: ["queued"]
+                )
+            }
+        }
+
+        // Persist newly seen client names
+        let beforeCount = seenClients.count
+        for name in grouped.keys { seenClients.insert(name) }
+        for name in priorities.keys { seenClients.insert(name) }
+        if seenClients.count != beforeCount,
+           let data = try? JSONEncoder().encode(Array(seenClients).sorted()) {
+            try? data.write(to: URL(fileURLWithPath: knownClientsPath), options: .atomic)
+        }
+
         var results: [ClientSession] = []
 
-        for harness in knownHarnesses {
-            if let entry = grouped.removeValue(forKey: harness) {
+        for clientName in seenClients.sorted() {
+            let isKnown = knownHarnesses.contains(clientName)
+            if let entry = grouped.removeValue(forKey: clientName) {
                 results.append(ClientSession(
-                    id: harness,
-                    name: harness,
+                    id: clientName,
+                    name: clientName,
                     computer: entry.computer,
                     isConnected: true,
                     connectionCount: entry.count,
                     pids: entry.pids.sorted(),
-                    isKnownHarness: true,
+                    isKnownHarness: isKnown,
                     activeDetails: entry.details
                 ))
             } else {
                 results.append(ClientSession(
-                    id: harness,
-                    name: harness,
+                    id: clientName,
+                    name: clientName,
                     computer: ComputerInfo.name,
                     isConnected: false,
                     connectionCount: 0,
                     pids: [],
-                    isKnownHarness: true,
+                    isKnownHarness: isKnown,
                     activeDetails: []
                 ))
             }
