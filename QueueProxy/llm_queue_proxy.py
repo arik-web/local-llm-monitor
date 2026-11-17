@@ -49,6 +49,47 @@ active_count = 0
 active_tasks: list[dict] = []
 waiting_queue: list[dict] = []
 next_seq = 0
+_slots_cache_ts = 0.0
+_slots_cache_val = MAX_CONCURRENT
+
+
+def get_effective_max_concurrent() -> int:
+    global _slots_cache_ts, _slots_cache_val
+    now = time.time()
+    if now - _slots_cache_ts < 2.0:
+        return _slots_cache_val
+    detected = None
+    try:
+        ps_out = subprocess.run(
+            ["/bin/ps", "-ax", "-o", "args="],
+            capture_output=True, text=True, timeout=0.6,
+        ).stdout
+        for line in ps_out.splitlines():
+            if "llama-server" not in line:
+                continue
+            tokens = line.split()
+            for i in range(len(tokens) - 1):
+                if tokens[i] == "--port" and tokens[i + 1].isdigit():
+                    port = int(tokens[i + 1])
+                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=0.6)
+                    try:
+                        conn.request("GET", "/slots")
+                        resp = conn.getresponse()
+                        if resp.status == 200:
+                            slots = json.loads(resp.read().decode("utf-8"))
+                            if isinstance(slots, list) and len(slots) > 0:
+                                detected = len(slots)
+                                break
+                    finally:
+                        conn.close()
+            if detected is not None:
+                break
+    except Exception:
+        pass
+    _slots_cache_ts = now
+    if detected is not None:
+        _slots_cache_val = detected
+    return _slots_cache_val
 
 
 def classify_client(cmd: str, args: str) -> str:
@@ -179,7 +220,7 @@ def identify_peer(client_ip: str, client_port: int, headers: dict) -> tuple[str,
 def queue_snapshot_locked(now: float | None = None) -> dict:
     t = now or time.time()
     return {
-        "maxConcurrent": MAX_CONCURRENT,
+        "maxConcurrent": _slots_cache_val,
         "activeCount": active_count,
         "priorities": dict(client_priorities),
         "active": [
@@ -236,6 +277,7 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length > 0 else None
 
     def _handle_queue_get(self):
+        get_effective_max_concurrent()
         with queue_cond:
             snap = queue_snapshot_locked()
         self._send_json(200, snap)
@@ -348,6 +390,8 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
         acquired = False
         task = None
 
+        max_conc = get_effective_max_concurrent()
+
         with queue_cond:
             next_seq += 1
             prio = client_priorities.get(program, "low")
@@ -363,7 +407,7 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
                 "startedAt": time.time(),
                 "cancelled": False,
             }
-            if active_count < MAX_CONCURRENT and not waiting_queue:
+            if active_count < max_conc and not waiting_queue:
                 active_count += 1
                 task["startedAt"] = time.time()
                 active_tasks.append(task)
@@ -384,7 +428,8 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
                             waiting_queue.remove(task)
                         return self._send_json(499, {"error": "cancelled from queue"})
 
-                    if active_count < MAX_CONCURRENT and waiting_queue and waiting_queue[0]["id"] == task["id"]:
+                    cur_max = get_effective_max_concurrent()
+                    if active_count < cur_max and waiting_queue and waiting_queue[0]["id"] == task["id"]:
                         waiting_queue.pop(0)
                         active_count += 1
                         task["startedAt"] = time.time()
