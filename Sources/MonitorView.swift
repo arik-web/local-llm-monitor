@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 final class MonitorStore: ObservableObject {
     @Published private(set) var snapshot: MonitorSnapshot = .empty
+    @Published private(set) var restartingServiceIds: Set<String> = []
 
     let usageStore = UsageStore()
     private let collector = LLMCollector()
@@ -53,6 +54,21 @@ final class MonitorStore: ObservableObject {
         }
     }
 
+    func restartService(_ service: ServiceHealth) {
+        DispatchQueue.main.async {
+            self.restartingServiceIds.insert(service.id)
+        }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.collector.restartService(id: service.id, plistName: service.plistName)
+            Thread.sleep(forTimeInterval: 1.0)
+            self.pollOnce()
+            DispatchQueue.main.async {
+                self.restartingServiceIds.remove(service.id)
+            }
+        }
+    }
+
     private func pollOnce() {
         guard !isPolling else { return }
         isPolling = true
@@ -79,6 +95,7 @@ struct MonitorPopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 headerView
+                servicesSection
                 modelSection
                 summarySection
                 slotsSection
@@ -117,6 +134,47 @@ struct MonitorPopoverView: View {
             .padding(.vertical, 3)
             .background(Color.primary.opacity(0.06))
             .clipShape(Capsule())
+        }
+    }
+
+    @ViewBuilder
+    private var servicesSection: some View {
+        if !snap.services.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(snap.services) { svc in
+                    let isRestarting = store.restartingServiceIds.contains(svc.id)
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(svc.isRunning ? Color.green : Color.red)
+                            .frame(width: 6, height: 6)
+                        Text(svc.name)
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(svc.isRunning ? .primary : .red)
+                        Spacer(minLength: 2)
+                        Button {
+                            store.restartService(svc)
+                        } label: {
+                            if isRestarting {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .scaleEffect(0.65)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(svc.isRunning ? .secondary : .red)
+                        .help(svc.isRunning ? "Reload \(svc.name)" : "Start \(svc.name)")
+                        .disabled(isRestarting)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity)
+                    .background(svc.isRunning ? Color.primary.opacity(0.05) : Color.red.opacity(0.12))
+                    .cornerRadius(7)
+                }
+            }
         }
     }
 

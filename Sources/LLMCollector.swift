@@ -105,7 +105,8 @@ final class LLMCollector {
         let (online, models) = fetchOllamaModels()
         let ports = discoverLlamaServerPorts()
         let logTimings = readRecentLogTimings()
-        let (activeProxyOwners, queued, priorities) = fetchQueueState()
+        let (activeProxyOwners, queued, priorities, queueOnline) = fetchQueueState()
+        let services = collectServicesHealth(ollamaOnline: online || !ports.isEmpty, queueOnline: queueOnline)
         let (clients, candidateOwners) = fetchConnectedClients(
             activeProxyOwners: activeProxyOwners,
             queuedTasks: queued,
@@ -125,7 +126,8 @@ final class LLMCollector {
             slots: slots,
             clients: clients,
             queuedTasks: queued,
-            clientPriorities: priorities
+            clientPriorities: priorities,
+            services: services
         )
     }
 
@@ -141,6 +143,43 @@ final class LLMCollector {
         sendQueuePost(path: "/_queue/priority", payload: ["client": client, "priority": priority.rawValue])
     }
 
+    func restartService(id: String, plistName: String) {
+        let uid = getuid()
+        let target = "gui/\(uid)/\(id)"
+        let check = runCommandWithExit("/bin/launchctl", args: ["print", target])
+        if check == 0 {
+            _ = runCommandWithExit("/bin/launchctl", args: ["kickstart", "-k", target])
+        } else {
+            let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/" + plistName
+            _ = runCommandWithExit("/bin/launchctl", args: ["bootstrap", "gui/\(uid)", plistPath])
+        }
+    }
+
+    private func collectServicesHealth(ollamaOnline: Bool, queueOnline: Bool) -> [ServiceHealth] {
+        let directOllama = syncGET(url: URL(string: "http://127.0.0.1:11436/api/version")!) != nil
+        let authOnline = syncGET(url: URL(string: "http://127.0.0.1:11435/key")!) != nil
+        return [
+            ServiceHealth(
+                id: "sh.brew.ollama",
+                name: "Ollama",
+                plistName: "sh.brew.ollama.plist",
+                isRunning: directOllama || ollamaOnline
+            ),
+            ServiceHealth(
+                id: "local.llm-queue-proxy",
+                name: "Queue",
+                plistName: "local.llm-queue-proxy.plist",
+                isRunning: queueOnline
+            ),
+            ServiceHealth(
+                id: "local.ollama-auth-proxy",
+                name: "Auth",
+                plistName: "local.ollama-auth-proxy.plist",
+                isRunning: authOnline
+            )
+        ]
+    }
+
     private func sendQueuePost(path: String, payload: [String: Any]) {
         guard let url = URL(string: "http://127.0.0.1:11434\(path)") else { return }
         var req = URLRequest(url: url)
@@ -154,11 +193,11 @@ final class LLMCollector {
         _ = sem.wait(timeout: .now() + 1.0)
     }
 
-    private func fetchQueueState() -> ([SlotOwner], [QueuedTask], [String: ClientPriority]) {
+    private func fetchQueueState() -> ([SlotOwner], [QueuedTask], [String: ClientPriority], Bool) {
         guard let url = URL(string: "http://127.0.0.1:11434/_queue"),
               let data = syncGET(url: url),
               let decoded = try? JSONDecoder().decode(RawQueueResponse.self, from: data) else {
-            return ([], [], [:])
+            return ([], [], [:], false)
         }
         let activeOwners = (decoded.active ?? []).map {
             SlotOwner(computer: $0.computer, program: $0.program, detail: nil)
@@ -179,7 +218,7 @@ final class LLMCollector {
         for (k, v) in decoded.priorities ?? [:] {
             priorities[k] = ClientPriority(rawValue: v) ?? .low
         }
-        return (activeOwners, queued, priorities)
+        return (activeOwners, queued, priorities, true)
     }
 
     // MARK: - Ollama /api/ps
@@ -826,6 +865,21 @@ final class LLMCollector {
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return ""
+        }
+    }
+
+    private func runCommandWithExit(_ launchPath: String, args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: launchPath)
+        proc.arguments = args
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus
+        } catch {
+            return -1
         }
     }
 

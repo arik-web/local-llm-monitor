@@ -112,6 +112,13 @@ enum ClientPriority: String, Equatable {
     case low
 }
 
+struct ServiceHealth: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let plistName: String
+    let isRunning: Bool
+}
+
 struct QueuedTask: Identifiable, Equatable {
     let id: String
     let position: Int
@@ -131,6 +138,7 @@ struct MonitorSnapshot: Equatable {
     let clients: [ClientSession]
     let queuedTasks: [QueuedTask]
     let clientPriorities: [String: ClientPriority]
+    let services: [ServiceHealth]
 
     var activeSlots: [SlotInfo] {
         slots.filter { $0.isProcessing }
@@ -163,6 +171,7 @@ struct MonitorSnapshot: Equatable {
         slots: [],
         clients: [],
         queuedTasks: [],
-        clientPriorities: [:]
+        clientPriorities: [:],
+        services: []
     )
 }
