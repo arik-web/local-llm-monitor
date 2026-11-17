@@ -108,11 +108,19 @@ final class LLMCollector {
     }
 
     func moveQueuedTask(id: String, direction: String) {
+        sendQueueMove(payload: ["id": id, "direction": direction])
+    }
+
+    func moveQueuedTask(id: String, toIndex: Int) {
+        sendQueueMove(payload: ["id": id, "toIndex": toIndex])
+    }
+
+    private func sendQueueMove(payload: [String: Any]) {
         guard let url = URL(string: "http://127.0.0.1:11434/_queue/move") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "direction": direction])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         let sem = DispatchSemaphore(value: 0)
         session.dataTask(with: req) { _, _, _ in
             sem.signal()

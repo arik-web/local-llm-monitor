@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class MonitorStore: ObservableObject {
     @Published private(set) var snapshot: MonitorSnapshot = .empty
@@ -36,6 +37,14 @@ final class MonitorStore: ObservableObject {
         }
     }
 
+    func moveQueueItem(id: String, toIndex: Int) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.collector.moveQueuedTask(id: id, toIndex: toIndex)
+            self.pollOnce()
+        }
+    }
+
     private func pollOnce() {
         guard !isPolling else { return }
         isPolling = true
@@ -53,6 +62,8 @@ struct MonitorPopoverView: View {
     @ObservedObject var store: MonitorStore
     var onOpenReport: () -> Void
     var onQuit: () -> Void
+    @State private var draggingQueueId: String?
+    @State private var dropTargetQueueId: String?
 
     private var snap: MonitorSnapshot { store.snapshot }
 
@@ -203,6 +214,10 @@ struct MonitorPopoverView: View {
             if !snap.queuedTasks.isEmpty {
                 ForEach(Array(snap.queuedTasks.enumerated()), id: \.element.id) { idx, item in
                     HStack(spacing: 8) {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
                         Text("#\(item.position)")
                             .font(.caption.weight(.semibold).monospacedDigit())
                             .foregroundColor(.orange)
@@ -249,8 +264,28 @@ struct MonitorPopoverView: View {
                         }
                     }
                     .padding(7)
-                    .background(Color.orange.opacity(0.08))
+                    .background(Color.orange.opacity(draggingQueueId == item.id ? 0.18 : 0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(dropTargetQueueId == item.id && draggingQueueId != item.id ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                    )
                     .cornerRadius(7)
+                    .onDrag {
+                        draggingQueueId = item.id
+                        return NSItemProvider(object: item.id as NSString)
+                    }
+                    .onDrop(
+                        of: [UTType.text],
+                        delegate: QueueDropDelegate(
+                            targetId: item.id,
+                            targetIndex: idx,
+                            draggingId: $draggingQueueId,
+                            dropTargetId: $dropTargetQueueId,
+                            onMove: { draggedId, toIdx in
+                                store.moveQueueItem(id: draggedId, toIndex: toIdx)
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -337,6 +372,50 @@ struct MonitorPopoverView: View {
             .foregroundColor(.red)
         }
         .padding(.top, 2)
+    }
+}
+
+private struct QueueDropDelegate: DropDelegate {
+    let targetId: String
+    let targetIndex: Int
+    @Binding var draggingId: String?
+    @Binding var dropTargetId: String?
+    let onMove: (String, Int) -> Void
+
+    func dropEntered(info: DropInfo) {
+        dropTargetId = targetId
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropTargetId == targetId {
+            dropTargetId = nil
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggingId = nil
+            dropTargetId = nil
+        }
+        if let dragged = draggingId, dragged != targetId {
+            onMove(dragged, targetIndex)
+            return true
+        }
+        if let provider = info.itemProviders(for: [UTType.text]).first {
+            provider.loadObject(ofClass: NSString.self) { item, _ in
+                if let str = item as? String, str != targetId {
+                    DispatchQueue.main.async {
+                        onMove(str, targetIndex)
+                    }
+                }
+            }
+            return true
+        }
+        return false
     }
 }
 

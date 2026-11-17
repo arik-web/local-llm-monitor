@@ -217,11 +217,17 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "invalid json"})
         task_id = req.get("id", "")
         direction = req.get("direction", "")
+        to_index = req.get("toIndex")
 
         with queue_cond:
             idx = next((i for i, item in enumerate(waiting_queue) if item["id"] == task_id), None)
             if idx is not None:
-                if direction == "up" and idx > 0:
+                if isinstance(to_index, int):
+                    target = max(0, min(len(waiting_queue) - 1, to_index))
+                    if target != idx:
+                        item = waiting_queue.pop(idx)
+                        waiting_queue.insert(target, item)
+                elif direction == "up" and idx > 0:
                     waiting_queue[idx - 1], waiting_queue[idx] = waiting_queue[idx], waiting_queue[idx - 1]
                 elif direction == "down" and idx < len(waiting_queue) - 1:
                     waiting_queue[idx + 1], waiting_queue[idx] = waiting_queue[idx], waiting_queue[idx + 1]
