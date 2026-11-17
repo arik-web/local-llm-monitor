@@ -54,12 +54,14 @@ final class LLMCollector {
             let position: Int
             let computer: String
             let program: String
+            let priority: String?
             let model: String
             let path: String
             let waitSeconds: Double
         }
         let maxConcurrent: Int?
         let activeCount: Int?
+        let priorities: [String: String]?
         let active: [ActiveItem]?
         let queued: [Item]?
     }
@@ -88,7 +90,7 @@ final class LLMCollector {
         let (online, models) = fetchOllamaModels()
         let ports = discoverLlamaServerPorts()
         let logTimings = readRecentLogTimings()
-        let (activeProxyOwners, queued) = fetchQueueState()
+        let (activeProxyOwners, queued, priorities) = fetchQueueState()
         let (clients, candidateOwners) = fetchConnectedClients(activeProxyOwners: activeProxyOwners)
         let slots = fetchSlots(
             ports: ports,
@@ -103,20 +105,25 @@ final class LLMCollector {
             models: models,
             slots: slots,
             clients: clients,
-            queuedTasks: queued
+            queuedTasks: queued,
+            clientPriorities: priorities
         )
     }
 
     func moveQueuedTask(id: String, direction: String) {
-        sendQueueMove(payload: ["id": id, "direction": direction])
+        sendQueuePost(path: "/_queue/move", payload: ["id": id, "direction": direction])
     }
 
     func moveQueuedTask(id: String, toIndex: Int) {
-        sendQueueMove(payload: ["id": id, "toIndex": toIndex])
+        sendQueuePost(path: "/_queue/move", payload: ["id": id, "toIndex": toIndex])
     }
 
-    private func sendQueueMove(payload: [String: Any]) {
-        guard let url = URL(string: "http://127.0.0.1:11434/_queue/move") else { return }
+    func setClientPriority(client: String, priority: ClientPriority) {
+        sendQueuePost(path: "/_queue/priority", payload: ["client": client, "priority": priority.rawValue])
+    }
+
+    private func sendQueuePost(path: String, payload: [String: Any]) {
+        guard let url = URL(string: "http://127.0.0.1:11434\(path)") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -128,11 +135,11 @@ final class LLMCollector {
         _ = sem.wait(timeout: .now() + 1.0)
     }
 
-    private func fetchQueueState() -> ([SlotOwner], [QueuedTask]) {
+    private func fetchQueueState() -> ([SlotOwner], [QueuedTask], [String: ClientPriority]) {
         guard let url = URL(string: "http://127.0.0.1:11434/_queue"),
               let data = syncGET(url: url),
               let decoded = try? JSONDecoder().decode(RawQueueResponse.self, from: data) else {
-            return ([], [])
+            return ([], [], [:])
         }
         let activeOwners = (decoded.active ?? []).map {
             SlotOwner(computer: $0.computer, program: $0.program, detail: nil)
@@ -143,12 +150,17 @@ final class LLMCollector {
                 position: $0.position,
                 computer: $0.computer,
                 program: $0.program,
+                priority: ClientPriority(rawValue: $0.priority ?? "low") ?? .low,
                 model: $0.model,
                 path: $0.path,
                 waitSeconds: $0.waitSeconds
             )
         }
-        return (activeOwners, queued)
+        var priorities: [String: ClientPriority] = [:]
+        for (k, v) in decoded.priorities ?? [:] {
+            priorities[k] = ClientPriority(rawValue: v) ?? .low
+        }
+        return (activeOwners, queued, priorities)
     }
 
     // MARK: - Ollama /api/ps

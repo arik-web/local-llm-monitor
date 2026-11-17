@@ -73,6 +73,35 @@ def classify_client(cmd: str, args: str) -> str:
 
 
 HOSTS_FILE = os.path.expanduser("~/.local/share/llm-queue-proxy/hosts.json")
+PRIORITIES_FILE = os.path.expanduser("~/.local/share/llm-queue-proxy/priorities.json")
+PRIORITY_WEIGHT = {"high": 2, "medium": 1, "low": 0}
+
+
+def load_priorities() -> dict[str, str]:
+    try:
+        with open(PRIORITIES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return {
+                    str(k): str(v).lower()
+                    for k, v in data.items()
+                    if str(v).lower() in ("high", "medium")
+                }
+    except Exception:
+        pass
+    return {}
+
+
+def save_priorities(data: dict[str, str]):
+    try:
+        os.makedirs(os.path.dirname(PRIORITIES_FILE), exist_ok=True)
+        with open(PRIORITIES_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+client_priorities: dict[str, str] = load_priorities()
 
 
 def load_host_aliases() -> dict[str, str]:
@@ -152,6 +181,7 @@ def queue_snapshot_locked(now: float | None = None) -> dict:
     return {
         "maxConcurrent": MAX_CONCURRENT,
         "activeCount": active_count,
+        "priorities": dict(client_priorities),
         "active": [
             {
                 "id": item["id"],
@@ -169,6 +199,7 @@ def queue_snapshot_locked(now: float | None = None) -> dict:
                 "position": idx + 1,
                 "computer": item["computer"],
                 "program": item["program"],
+                "priority": item.get("priority", "low"),
                 "model": item["model"],
                 "path": item["path"],
                 "waitSeconds": round(max(0.0, t - item["enqueuedAt"]), 1),
@@ -238,6 +269,33 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
             snap = queue_snapshot_locked()
         self._send_json(200, snap)
 
+    def _handle_queue_priority(self):
+        body = self._read_body() or b"{}"
+        try:
+            req = json.loads(body.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "invalid json"})
+        client = str(req.get("client") or "").strip()
+        prio = str(req.get("priority") or "low").lower()
+        if not client or prio not in ("high", "medium", "low"):
+            return self._send_json(400, {"error": "invalid client or priority"})
+
+        with queue_cond:
+            if prio == "low":
+                client_priorities.pop(client, None)
+            else:
+                client_priorities[client] = prio
+            save_priorities(client_priorities)
+            for item in waiting_queue:
+                if item["program"] == client:
+                    item["priority"] = prio
+            waiting_queue.sort(
+                key=lambda x: (-PRIORITY_WEIGHT.get(x.get("priority", "low"), 0), x.get("seq", 0))
+            )
+            queue_cond.notify_all()
+            snap = queue_snapshot_locked()
+        self._send_json(200, snap)
+
     def _handle_queue_cancel(self):
         body = self._read_body() or b"{}"
         try:
@@ -267,6 +325,8 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
             return self._handle_queue_get()
         if self.command == "POST" and path_only == "/_queue/move":
             return self._handle_queue_move()
+        if self.command == "POST" and path_only == "/_queue/priority":
+            return self._handle_queue_priority()
         if self.command == "POST" and path_only == "/_queue/cancel":
             return self._handle_queue_cancel()
 
@@ -290,10 +350,13 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
 
         with queue_cond:
             next_seq += 1
+            prio = client_priorities.get(program, "low")
             task = {
                 "id": f"q-{next_seq}",
+                "seq": next_seq,
                 "computer": computer,
                 "program": program,
+                "priority": prio,
                 "model": model,
                 "path": path_only,
                 "enqueuedAt": time.time(),
@@ -306,7 +369,13 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
                 active_tasks.append(task)
                 acquired = True
             else:
-                waiting_queue.append(task)
+                w = PRIORITY_WEIGHT.get(prio, 0)
+                insert_idx = len(waiting_queue)
+                for i, existing in enumerate(waiting_queue):
+                    if PRIORITY_WEIGHT.get(existing.get("priority", "low"), 0) < w:
+                        insert_idx = i
+                        break
+                waiting_queue.insert(insert_idx, task)
                 queue_cond.notify_all()
 
                 while True:

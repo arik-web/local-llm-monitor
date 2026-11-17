@@ -106,11 +106,18 @@ struct ClientSession: Identifiable, Equatable {
     let activeDetails: [String]
 }
 
+enum ClientPriority: String, Equatable {
+    case high
+    case medium
+    case low
+}
+
 struct QueuedTask: Identifiable, Equatable {
     let id: String
     let position: Int
     let computer: String
     let program: String
+    let priority: ClientPriority
     let model: String
     let path: String
     let waitSeconds: Double
@@ -123,6 +130,7 @@ struct MonitorSnapshot: Equatable {
     let slots: [SlotInfo]
     let clients: [ClientSession]
     let queuedTasks: [QueuedTask]
+    let clientPriorities: [String: ClientPriority]
 
     var activeSlots: [SlotInfo] {
         slots.filter { $0.isProcessing }
@@ -154,6 +162,7 @@ struct MonitorSnapshot: Equatable {
         models: [],
         slots: [],
         clients: [],
-        queuedTasks: []
+        queuedTasks: [],
+        clientPriorities: [:]
     )
 }

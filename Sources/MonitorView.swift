@@ -45,6 +45,14 @@ final class MonitorStore: ObservableObject {
         }
     }
 
+    func setClientPriority(client: String, priority: ClientPriority) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.collector.setClientPriority(client: client, priority: priority)
+            self.pollOnce()
+        }
+    }
+
     private func pollOnce() {
         guard !isPolling else { return }
         isPolling = true
@@ -224,9 +232,20 @@ struct MonitorPopoverView: View {
                             .frame(width: 24, alignment: .leading)
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("\(item.computer) · \(item.program)")
-                                .font(.caption.weight(.medium))
-                                .lineLimit(1)
+                            HStack(spacing: 5) {
+                                Text("\(item.computer) · \(item.program)")
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                if item.priority != .low {
+                                    Text(item.priority == .high ? "HIGH" : "MED")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background((item.priority == .high ? Color.red : Color.orange).opacity(0.2))
+                                        .foregroundColor(item.priority == .high ? .red : .orange)
+                                        .cornerRadius(3)
+                                }
+                            }
                             HStack(spacing: 6) {
                                 if !item.model.isEmpty {
                                     Text(item.model)
@@ -298,8 +317,9 @@ struct MonitorPopoverView: View {
                 .foregroundColor(.secondary)
 
             ForEach(snap.clients) { client in
+                let prio = snap.clientPriorities[client.name] ?? .low
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Circle()
                             .fill(client.isConnected ? Color.green : Color.gray.opacity(0.4))
                             .frame(width: 7, height: 7)
@@ -307,23 +327,51 @@ struct MonitorPopoverView: View {
                         Text(client.name)
                             .font(.subheadline)
                             .foregroundColor(client.isConnected ? .primary : .secondary)
+                            .lineLimit(1)
 
                         if client.isConnected {
                             Text("· \(client.computer)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
 
                         Spacer()
 
+                        HStack(spacing: 3) {
+                            PriorityPill(
+                                label: "Med",
+                                isActive: prio == .medium,
+                                activeColor: .orange
+                            ) {
+                                store.setClientPriority(
+                                    client: client.name,
+                                    priority: prio == .medium ? .low : .medium
+                                )
+                            }
+
+                            PriorityPill(
+                                label: "High",
+                                isActive: prio == .high,
+                                activeColor: .red
+                            ) {
+                                store.setClientPriority(
+                                    client: client.name,
+                                    priority: prio == .high ? .low : .high
+                                )
+                            }
+                        }
+
                         if client.isConnected {
-                            Text("\(client.connectionCount) conn\(client.connectionCount == 1 ? "" : "s")")
+                            Text("\(client.connectionCount)")
                                 .font(.caption.monospacedDigit())
                                 .foregroundColor(.secondary)
+                                .frame(minWidth: 16, alignment: .trailing)
                         } else {
                             Text("idle")
-                                .font(.caption)
+                                .font(.caption2)
                                 .foregroundColor(.secondary.opacity(0.7))
+                                .frame(minWidth: 22, alignment: .trailing)
                         }
                     }
 
@@ -372,6 +420,26 @@ struct MonitorPopoverView: View {
             .foregroundColor(.red)
         }
         .padding(.top, 2)
+    }
+}
+
+private struct PriorityPill: View {
+    let label: String
+    let isActive: Bool
+    let activeColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(isActive ? activeColor.opacity(0.22) : Color.primary.opacity(0.06))
+                .foregroundColor(isActive ? activeColor : .secondary)
+                .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
     }
 }
 
