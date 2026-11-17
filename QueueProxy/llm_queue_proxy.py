@@ -445,7 +445,7 @@ class QueueProxyHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, http.client.IncompleteRead):
             pass
         finally:
             conn.close()
