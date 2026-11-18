@@ -112,6 +112,22 @@ enum ClientPriority: String, Equatable {
     case low
 }
 
+struct HardwareMetrics: Equatable {
+    let gpuUtilizationPercent: Int
+    let gpuInUseBytes: Int64
+    let modelMemoryBytes: Int64
+    let modelMemoryPercent: Double
+    let totalSystemMemoryBytes: Int64
+
+    static let empty = HardwareMetrics(
+        gpuUtilizationPercent: 0,
+        gpuInUseBytes: 0,
+        modelMemoryBytes: 0,
+        modelMemoryPercent: 0,
+        totalSystemMemoryBytes: Int64(ProcessInfo.processInfo.physicalMemory)
+    )
+}
+
 struct ServiceHealth: Identifiable, Equatable {
     let id: String
     let name: String
@@ -139,6 +155,7 @@ struct MonitorSnapshot: Equatable {
     let queuedTasks: [QueuedTask]
     let clientPriorities: [String: ClientPriority]
     let services: [ServiceHealth]
+    let hardware: HardwareMetrics
 
     var activeSlots: [SlotInfo] {
         slots.filter { $0.isProcessing }
@@ -172,6 +189,7 @@ struct MonitorSnapshot: Equatable {
         clients: [],
         queuedTasks: [],
         clientPriorities: [:],
-        services: []
+        services: [],
+        hardware: .empty
     )
 }

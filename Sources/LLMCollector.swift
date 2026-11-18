@@ -107,6 +107,7 @@ final class LLMCollector {
         let logTimings = readRecentLogTimings()
         let (activeProxyOwners, queued, priorities, queueOnline) = fetchQueueState()
         let services = collectServicesHealth(ollamaOnline: online || !ports.isEmpty, queueOnline: queueOnline)
+        let hardware = collectHardwareMetrics(models: models)
         let (clients, candidateOwners) = fetchConnectedClients(
             activeProxyOwners: activeProxyOwners,
             queuedTasks: queued,
@@ -127,7 +128,8 @@ final class LLMCollector {
             clients: clients,
             queuedTasks: queued,
             clientPriorities: priorities,
-            services: services
+            services: services,
+            hardware: hardware
         )
     }
 
@@ -178,6 +180,54 @@ final class LLMCollector {
                 isRunning: authOnline
             )
         ]
+    }
+
+    // MARK: - GPU & Model Memory Metrics
+
+    private func collectHardwareMetrics(models: [LoadedModelInfo]) -> HardwareMetrics {
+        let totalMem = Int64(ProcessInfo.processInfo.physicalMemory)
+        var gpuUtil = 0
+        var gpuInUse: Int64 = 0
+
+        let ioregOut = runCommand("/usr/sbin/ioreg", args: ["-r", "-d", "1", "-c", "IOAccelerator", "-a"])
+        if let data = ioregOut.data(using: .utf8),
+           let arr = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] {
+            for entry in arr {
+                if let stats = entry["PerformanceStatistics"] as? [String: Any] {
+                    if let util = stats["Device Utilization %"] as? Int {
+                        gpuUtil = util
+                    }
+                    if let inUse = stats["In use system memory"] as? NSNumber {
+                        gpuInUse = inUse.int64Value
+                    }
+                    break
+                }
+            }
+        }
+
+        // Sum RSS of all running llama-server processes
+        var rssBytes: Int64 = 0
+        let psOut = runCommand("/bin/ps", args: ["-ax", "-o", "rss=,comm="])
+        for line in psOut.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("llama-server"),
+                  let spaceIdx = trimmed.firstIndex(where: { $0.isWhitespace }),
+                  let rssKB = Int64(trimmed[..<spaceIdx]) else {
+                continue
+            }
+            rssBytes += rssKB * 1024
+        }
+
+        let modelMemBytes = rssBytes > 0 ? rssBytes : models.reduce(0) { $0 + $1.sizeVramBytes }
+        let modelMemPct = totalMem > 0 ? (Double(modelMemBytes) / Double(totalMem)) * 100.0 : 0
+
+        return HardwareMetrics(
+            gpuUtilizationPercent: gpuUtil,
+            gpuInUseBytes: gpuInUse,
+            modelMemoryBytes: modelMemBytes,
+            modelMemoryPercent: modelMemPct,
+            totalSystemMemoryBytes: totalMem
+        )
     }
 
     private func sendQueuePost(path: String, payload: [String: Any]) {

@@ -97,6 +97,7 @@ struct MonitorPopoverView: View {
                 headerView
                 servicesSection
                 modelSection
+                hardwareSection
                 summarySection
                 slotsSection
                 queueSection
@@ -205,6 +206,58 @@ struct MonitorPopoverView: View {
             .padding(9)
             .background(Color.primary.opacity(0.05))
             .cornerRadius(8)
+        }
+    }
+
+    @ViewBuilder
+    private var hardwareSection: some View {
+        let hw = snap.hardware
+        if snap.ollamaOnline || hw.modelMemoryBytes > 0 || hw.gpuUtilizationPercent > 0 {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("GPU")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(hw.gpuUtilizationPercent)%")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                    }
+                    ProgressView(value: Double(min(100, max(0, hw.gpuUtilizationPercent))), total: 100.0)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(hw.gpuUtilizationPercent >= 90 ? .orange : .accentColor)
+                    Text("VRAM \(formatGB(hw.gpuInUseBytes))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(8)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Model RAM")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(String(format: "%.0f%%", hw.modelMemoryPercent))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                    }
+                    ProgressView(value: min(100.0, max(0.0, hw.modelMemoryPercent)), total: 100.0)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(hw.modelMemoryPercent >= 80 ? .orange : .green)
+                    Text("\(formatGB(hw.modelMemoryBytes)) / \(formatGB(hw.totalSystemMemoryBytes))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(8)
+            }
         }
     }
 
@@ -655,6 +708,11 @@ private struct SlotRow: View {
             return "idle"
         }
     }
+}
+
+private func formatGB(_ bytes: Int64) -> String {
+    let gb = Double(bytes) / 1_073_741_824.0
+    return String(format: "%.1f GB", gb)
 }
 
 private func formatCompact(_ n: Int) -> String {
