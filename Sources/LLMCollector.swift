@@ -522,7 +522,7 @@ final class LLMCollector {
         }
 
         var grouped: [String: GroupedClient] = [:]
-        var candidateOwners: [SlotOwner] = []
+        var fallbackOwners: [SlotOwner] = []
 
         for pid in pids {
             let cmd = pidCommands[pid] ?? "Unknown"
@@ -538,7 +538,7 @@ final class LLMCollector {
             grouped[program] = entry
 
             if program != "Hermes" {
-                candidateOwners.append(SlotOwner(
+                fallbackOwners.append(SlotOwner(
                     computer: ComputerInfo.name,
                     program: program,
                     detail: subDetail
@@ -546,35 +546,48 @@ final class LLMCollector {
             }
         }
 
-        // Merge active proxy tasks (especially remote computers via Auth Proxy)
+        // Merge active proxy tasks into Clients list
         for owner in activeProxyOwners where owner.program != "Hermes" {
             let key = owner.program
             var entry = grouped[key] ?? GroupedClient(count: 0, pids: [], computer: owner.computer, details: [])
             entry.count = max(entry.count, 1)
             entry.computer = owner.computer
             grouped[key] = entry
-            if !candidateOwners.contains(owner) {
-                candidateOwners.append(owner)
-            }
         }
 
         // Enrich Hermes with live bot / session names from ~/.hermes/state.db
+        let hermesDetails = grouped["Hermes"] != nil || activeProxyOwners.contains(where: { $0.program == "Hermes" })
+            ? fetchHermesActiveDetails()
+            : []
+
         if var hermesEntry = grouped["Hermes"] {
-            let hermesDetails = fetchHermesActiveDetails()
             hermesEntry.details = hermesDetails
             grouped["Hermes"] = hermesEntry
+        }
 
-            if hermesDetails.isEmpty {
-                candidateOwners.insert(
-                    SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: nil),
-                    at: 0
-                )
-            } else {
-                let hermesOwners = hermesDetails.map {
-                    SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: $0)
+        // Build candidateOwners 1-to-1 from activeProxyOwners when available so every active slot
+        // matches an actual in-flight request (e.g. Mac mini · DeepSeek Harness is never crowded out).
+        var candidateOwners: [SlotOwner] = []
+        if !activeProxyOwners.isEmpty {
+            var hermesIdx = 0
+            for owner in activeProxyOwners {
+                if owner.program == "Hermes" {
+                    let detail = hermesIdx < hermesDetails.count ? hermesDetails[hermesIdx] : nil
+                    hermesIdx += 1
+                    candidateOwners.append(SlotOwner(computer: owner.computer, program: "Hermes", detail: detail))
+                } else {
+                    candidateOwners.append(owner)
                 }
-                candidateOwners.insert(contentsOf: hermesOwners, at: 0)
             }
+        } else {
+            if hermesDetails.isEmpty && grouped["Hermes"] != nil {
+                candidateOwners.append(SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: nil))
+            } else {
+                candidateOwners.append(contentsOf: hermesDetails.map {
+                    SlotOwner(computer: ComputerInfo.name, program: "Hermes", detail: $0)
+                })
+            }
+            candidateOwners.append(contentsOf: fallbackOwners)
         }
 
         // Add any remote computers connected over LAN
